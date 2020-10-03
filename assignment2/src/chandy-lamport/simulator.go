@@ -19,11 +19,12 @@ const maxDelay = 5
 // to pass tokens to each other, and collecting the snapshot state after the process
 // has terminated.
 type Simulator struct {
-	time           int
-	nextSnapshotId int
-	servers        map[string]*Server // key = server ID
-	logger         *Logger
-	// TODO: ADD MORE FIELDS HERE
+	time              int
+	nextSnapshotId    int
+	servers           map[string]*Server // key = server ID
+	logger            *Logger
+	collectionChannel chan string
+	allChannels       map[int]chan string
 }
 
 func NewSimulator() *Simulator {
@@ -32,6 +33,8 @@ func NewSimulator() *Simulator {
 		0,
 		make(map[string]*Server),
 		NewLogger(),
+		make(chan string, 100),
+		make(map[int]chan string),
 	}
 }
 
@@ -107,20 +110,60 @@ func (sim *Simulator) StartSnapshot(serverId string) {
 	snapshotId := sim.nextSnapshotId
 	sim.nextSnapshotId++
 	sim.logger.RecordEvent(sim.servers[serverId], StartSnapshot{serverId, snapshotId})
-	// TODO: IMPLEMENT ME
+	
+	// Get the initial server object and take its snapshot.
+	initialServer := sim.servers[serverId]
+	initialServer.StartSnapshot(snapshotId)
 }
 
 // Callback for servers to notify the simulator that the snapshot process has
 // completed on a particular server
 func (sim *Simulator) NotifySnapshotComplete(serverId string, snapshotId int) {
 	sim.logger.RecordEvent(sim.servers[serverId], EndSnapshot{serverId, snapshotId})
-	// TODO: IMPLEMENT ME
+	
+	// Create a channel for this snapshot in case there is any.
+	_, ok := sim.allChannels[snapshotId]
+	if !ok {
+		sim.allChannels[snapshotId] = make(chan string, 20)
+	}
+
+	// Stop blocking the snapshot process by sending the serverId in the channel.
+	sim.allChannels[snapshotId] <- serverId
 }
 
 // Collect and merge snapshot state from all the servers.
 // This function blocks until the snapshot process has completed on all servers.
 func (sim *Simulator) CollectSnapshot(snapshotId int) *SnapshotState {
-	// TODO: IMPLEMENT ME
 	snap := SnapshotState{snapshotId, make(map[string]int), make([]*SnapshotMessage, 0)}
+	
+	// Create a map of the pending servers to complete their snapshot. At the beginning, all servers are pending.
+	pendingServers := make(map[string]bool)
+	for key := range sim.servers {
+		pendingServers[key] = true
+	}
+
+	// The snapshot process will be blocked until there are no servers pending to complete their snapshots.
+	// The simulator removes the Id from pending servers map when channel associated receives the serverId to stop blocking the snapshot process.
+	for len(pendingServers) > 0 {
+		completedServerID := <-sim.allChannels[snapshotId]
+		delete(pendingServers, completedServerID)
+	}
+
+	// Get the individual snapshots of each server.
+	for _, server := range sim.servers {
+		// Store corresponding server snapshot.
+		serverSnapshot := server.snapshots[snapshotId]
+
+		// Copy the tokens from the snapshot into the global snapshot.
+		for key, value := range serverSnapshot.tokens {
+			snap.tokens[key] = value
+		}
+
+		// Append to the snapshot all subsequent messages.
+		for _, value := range serverSnapshot.messages {
+			snap.messages = append(snap.messages, value)
+		}
+	}
+	
 	return &snap
 }
